@@ -29,6 +29,7 @@ const (
 	debugCodeContextFile = "code.ctx"
 )
 
+// application entrypoint
 func main() {
 	var addr = flag.String("addr", "localhost:8000", "http service address")
 	var debug = flag.Bool("debug", false, "enable debug mode")
@@ -82,8 +83,8 @@ func main() {
 	defer c.Close()
 
 	// immediately send a message containing the application context so as to cache it on the server / ai
-	{
-		msg := ctxtypes.CtxRequest{Context: appCtx, Instructions: []string{"acknowledge this application context with 'context received'"}}
+	go func() {
+		msg := ctxtypes.CtxRequest{Step: ctxtypes.CtxStepPreload, Context: appCtx}
 
 		msgData, err := json.Marshal(msg)
 		if err != nil {
@@ -95,7 +96,7 @@ func main() {
 			close(done)
 			return
 		}
-	}
+	}()
 
 	// Message handler goroutine
 	wg.Add(1)
@@ -244,7 +245,7 @@ func main() {
 	close(stop)
 	close(prompt)
 
-	log.Info().Msg("Application shut down gracefully.")
+	log.Info().Msg("Graceful termination")
 }
 
 func parseFile(filePath string) ([]string, error) {

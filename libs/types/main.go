@@ -12,9 +12,18 @@ type ApplicationContext struct {
 	FileSystem map[string]FileSystemNode `json:"fs,omitempty"`
 }
 
+type CtxStep string
+
+const (
+	CtxStepPreload CtxStep = "preload"
+	CtxStepRun     CtxStep = "run"
+	CtxStepPostRun CtxStep = "postrun"
+)
+
 // CtxRequest represents a message sent from client to server
 type CtxRequest struct {
 	Context      ApplicationContext `json:"context,omitempty"`
+	Step         CtxStep            `json:"step"`
 	Instructions []string           `json:"instructions,omitempty"`
 }
 
