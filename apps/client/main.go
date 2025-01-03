@@ -25,8 +25,7 @@ import (
 )
 
 const (
-	ctxIgnoreFile        = ".ctxignore"
-	debugCodeContextFile = "code.ctx"
+	ctxIgnoreFile = ".ctxignore"
 )
 
 // application entrypoint
@@ -82,9 +81,29 @@ func main() {
 	}
 	defer c.Close()
 
+	// go func() {
+	// 	// Setup WebSocket connection
+	// 	conn := url.URL{Scheme: "ws", Host: *addr, Path: "/ping"}
+	// 	log.Printf("connecting to %s", conn.String())
+
+	// 	co, _, err := websocket.DefaultDialer.Dial(conn.String(), nil)
+	// 	if err != nil {
+	// 		log.Fatal().Err(err).Msg("dial")
+	// 	}
+	// 	defer co.Close()
+
+	// 	for {
+	// 		log.Info().Msg("ping")
+	// 		if err := co.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+	// 			log.Err(err).Msg("write")
+	// 		}
+	// 		time.Sleep(2 * time.Second)
+	// 	}
+	// }()
+
 	// immediately send a message containing the application context so as to cache it on the server / ai
 	go func() {
-		msg := ctxtypes.CtxRequest{Step: ctxtypes.CtxStepPreload, Context: appCtx}
+		msg := ctxtypes.CtxRequest{Step: ctxtypes.CtxStepLoadContext, Context: appCtx}
 
 		msgData, err := json.Marshal(msg)
 		if err != nil {
@@ -109,8 +128,11 @@ func main() {
 			case p := <-prompt:
 
 				// send the app context with the user prompt
-				selectFilesPrompt := fmt.Sprintf("Consider the previously provided application context. Return the list of files required to implement the requirements or instructions explained in the following user prompt: ```%s```. Return JSON.", p)
-				msg := ctxtypes.CtxRequest{Context: appCtx, Instructions: []string{selectFilesPrompt}}
+				msg := ctxtypes.CtxRequest{
+					Step:       ctxtypes.CtxStepFileSelection,
+					Context:    appCtx,
+					UserPrompt: p,
+				}
 
 				msgData, err := json.Marshal(msg)
 				if err != nil {
@@ -208,11 +230,12 @@ func main() {
 				case <-done:
 					return
 				case prompt <- input:
+					log.Info().Str("value", input).Msg("prompt")
 					spinnerDone := make(chan struct{})
-					go func() {
-						showSpinner(stop)
-						close(spinnerDone)
-					}()
+					// go func() {
+					// 	showSpinner(stop)
+					// 	close(spinnerDone)
+					// }()
 
 					_, message, err := c.ReadMessage()
 					if err != nil {

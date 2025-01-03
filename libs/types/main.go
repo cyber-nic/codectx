@@ -15,16 +15,16 @@ type ApplicationContext struct {
 type CtxStep string
 
 const (
-	CtxStepPreload CtxStep = "preload"
-	CtxStepRun     CtxStep = "run"
-	CtxStepPostRun CtxStep = "postrun"
+	CtxStepLoadContext   CtxStep = "load"
+	CtxStepFileSelection CtxStep = "select"
+	CtxStepCodeWork      CtxStep = "work"
 )
 
 // CtxRequest represents a message sent from client to server
 type CtxRequest struct {
-	Context      ApplicationContext `json:"context,omitempty"`
-	Step         CtxStep            `json:"step"`
-	Instructions []string           `json:"instructions,omitempty"`
+	Context    ApplicationContext `json:"context,omitempty"`
+	Step       CtxStep            `json:"step"`
+	UserPrompt string             `json:"userPrompt,omitempty"`
 }
 
 // CtxResponse represents a message sent from server to client
