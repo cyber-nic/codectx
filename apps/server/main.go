@@ -39,60 +39,6 @@ func extractResponseContent(resp *genai.GenerateContentResponse) (string, error)
 	return builder.String(), nil
 }
 
-func wsPingHandler() func(w http.ResponseWriter, r *http.Request) {
-	var upgrader = websocket.Upgrader{} // use default options
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			log.Err(err).Msg("ws upgrade")
-			return
-		}
-		defer c.Close()
-
-		// Set up a close handler
-		c.SetCloseHandler(func(code int, text string) error {
-			log.Info().Int("code", code).Str("text", text).Msg("received close frame")
-			message := websocket.FormatCloseMessage(code, "")
-			return c.WriteControl(websocket.CloseMessage, message, time.Now().Add(time.Second))
-		})
-
-		for {
-			mt, message, err := c.ReadMessage()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err,
-					websocket.CloseNormalClosure,
-					websocket.CloseGoingAway,
-					websocket.CloseAbnormalClosure) {
-					log.Err(err).Msg("unexpected close error")
-				} else {
-					log.Info().Msg("websocket closed normally")
-				}
-				break
-			}
-
-			// Handle close messages
-			if mt == websocket.CloseMessage {
-				log.Info().Msg("received close message")
-				return
-			}
-
-			// Only process text messages
-			if mt != websocket.TextMessage {
-				continue
-			}
-
-			log.Info().Str("recv", string(message)).Str("send", "pong").Msg("ping")
-
-			if err = c.WriteMessage(mt, []byte("pong")); err != nil {
-				log.Err(err).Msg("failed to write message to ws")
-				return
-			}
-
-		}
-	}
-}
-
 func wsHandler(ctx context.Context, client *genai.Client) func(w http.ResponseWriter, r *http.Request) {
 	var upgrader = websocket.Upgrader{} // use default options
 
@@ -320,8 +266,6 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to create AI client")
 	}
 	defer ai.Close()
-
-	http.HandleFunc("/ping", wsPingHandler())
 
 	http.HandleFunc("/data", wsHandler(ctx, ai))
 

@@ -81,26 +81,6 @@ func main() {
 	}
 	defer c.Close()
 
-	// go func() {
-	// 	// Setup WebSocket connection
-	// 	conn := url.URL{Scheme: "ws", Host: *addr, Path: "/ping"}
-	// 	log.Printf("connecting to %s", conn.String())
-
-	// 	co, _, err := websocket.DefaultDialer.Dial(conn.String(), nil)
-	// 	if err != nil {
-	// 		log.Fatal().Err(err).Msg("dial")
-	// 	}
-	// 	defer co.Close()
-
-	// 	for {
-	// 		log.Info().Msg("ping")
-	// 		if err := co.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
-	// 			log.Err(err).Msg("write")
-	// 		}
-	// 		time.Sleep(2 * time.Second)
-	// 	}
-	// }()
-
 	// immediately send a message containing the application context so as to cache it on the server / ai
 	go func() {
 		msg := ctxtypes.CtxRequest{Step: ctxtypes.CtxStepLoadContext, Context: appCtx}
