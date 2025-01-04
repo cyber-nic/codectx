@@ -4,12 +4,13 @@ package ctxtypes
 type FileSystemNode struct {
 	Directory bool                       `json:"dir,omitempty"`
 	Children  map[string]*FileSystemNode `json:"children,omitempty"`
-	Ignore    bool                       `json:"ignore,omitempty"`
+	Skip      bool                       `json:"skip,omitempty"`
 	Keywords  []string                   `json:"keywords,omitempty"`
 }
 
 type ApplicationContext struct {
-	FileSystem map[string]FileSystemNode `json:"fs,omitempty"`
+	FileSystem        map[string]FileSystemNode `json:"fs,omitempty"`
+	FileSystemDetails []string                  `json:"fs_details,omitempty"`
 }
 
 type CtxStep string
@@ -22,6 +23,7 @@ const (
 
 // CtxRequest represents a message sent from client to server
 type CtxRequest struct {
+	ClientID   string             `json:"clientID"`
 	Context    ApplicationContext `json:"context,omitempty"`
 	Step       CtxStep            `json:"step"`
 	UserPrompt string             `json:"userPrompt,omitempty"`

@@ -1,6 +1,9 @@
 package ctxutils
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 
 	"github.com/rs/zerolog"
@@ -15,6 +18,7 @@ func ConfigLogging(debug *bool) {
 
 	if debug != nil && *debug {
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+		log.Debug().Msg("debug logging enabled")
 	}
 
 	// add CTX_LOG env variable to set log level
@@ -22,8 +26,10 @@ func ConfigLogging(debug *bool) {
 		switch logLevel {
 		case "debug":
 			zerolog.SetGlobalLevel(zerolog.DebugLevel)
+			log.Debug().Msg("debug logging enabled")
 		case "trace":
 			zerolog.SetGlobalLevel(zerolog.TraceLevel)
+			log.Trace().Msg("trace logging enabled")
 		case "error":
 			zerolog.SetGlobalLevel(zerolog.ErrorLevel)
 		default:
@@ -35,4 +41,14 @@ func ConfigLogging(debug *bool) {
 
 	// default log level
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+}
+
+// PrintStruct prints a struct as JSON.
+func PrintStruct(w io.Writer, t interface{}) {
+	j, _ := json.MarshalIndent(t, "", "  ")
+	fmt.Fprintln(w, string(j))
+}
+
+func PrintStructOut(t interface{}) {
+	PrintStruct(os.Stdout, t)
 }

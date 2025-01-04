@@ -2,11 +2,12 @@ package main
 
 import (
 	"bufio"
-	"fmt"
+	"bytes"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -17,29 +18,19 @@ import (
 	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
-func showSpinner(done chan bool) {
-	spinnerChars := []rune{'|', '/', '-', '\\'}
-	for {
-		select {
-		case <-done:
-			// Stop the spinner when done
-			fmt.Printf("\r") // Clear the spinner line
-			return
-		default:
-			// Display spinner animation
-			for _, r := range spinnerChars {
-				fmt.Printf("\rProcessing... %c", r)
-				time.Sleep(100 * time.Millisecond)
-				select {
-				case <-done:
-					fmt.Printf("\r") // Clear the spinner line
-					return
-				default:
-					// Continue spinning
-				}
+// getMacAddr gets the MAC hardware
+// address of the host machine
+func getMacAddr() (string, error) {
+	interfaces, err := net.Interfaces()
+	if err == nil {
+		for _, i := range interfaces {
+			if i.Flags&net.FlagUp != 0 && bytes.Compare(i.HardwareAddr, nil) != 0 {
+				// Don't use random as we have a real address
+				return i.HardwareAddr.String(), nil
 			}
 		}
 	}
+	return "", errors.New("could not get MAC address")
 }
 
 func loadIgnoreList(ignoreFilePath string) []string {

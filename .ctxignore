@@ -4,4 +4,4 @@
 testdata/
 *.log
 .*
-go.*
+go.sum

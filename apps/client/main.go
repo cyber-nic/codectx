@@ -11,7 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,11 +30,42 @@ const (
 
 // application entrypoint
 func main() {
+	// Setup signal handling to gracefully shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Signal handling
+	go func() {
+		<-sigChan // Wait for SIGINT or SIGTERM
+		log.Trace().Msg("SIG(INT|TERM)")
+
+		// Start a new goroutine to listen for a second SIGINT or SIGTERM
+		go func() {
+			<-sigChan // Wait for second SIGINT or SIGTERM
+			log.Fatal().Msg("Immediate shutdown initiated.")
+		}()
+
+		time.AfterFunc(10*time.Second, func() {
+			log.Fatal().Msg("Graceful shutdown timed out.")
+		})
+
+		// All ongoing operations completed
+		log.Info().Msg("Graceful shutdown")
+		os.Exit(0)
+	}()
+
 	var addr = flag.String("addr", "localhost:8000", "http service address")
 	var debug = flag.Bool("debug", false, "enable debug mode")
 	flag.Parse()
 
 	ctxutils.ConfigLogging(debug)
+
+	// Get the MAC address of the host machine to identify unauthenticated users. Skip if logged in
+	macAddr, err := getMacAddr()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Error getting MAC address")
+	}
+	log.Trace().Str("client_id", macAddr).Msg("client")
 
 	// Get the current working directory
 	cwd, err := os.Getwd()
@@ -52,201 +83,175 @@ func main() {
 		log.Fatal().Err(err).Msg("Error getting folder structure")
 	}
 
-	appCtx := ctxtypes.ApplicationContext{FileSystem: rootNode}
-
-	jsonData, err := json.Marshal(appCtx)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Error marshalling JSON")
+	appCtx := ctxtypes.ApplicationContext{
+		FileSystemDetails: []string{
+			"'Skip' signifies that the file or directory exists, but content is ignored",
+		},
+		FileSystem: rootNode,
 	}
-
-	log.Trace().Int("len", len(jsonData)).Msg("Application context")
 
 	// Create channels for coordination
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
-	done := make(chan struct{})
-	stop := make(chan bool)
-	prompt := make(chan string, 1)
-
-	// Create WaitGroup to track goroutines
-	var wg sync.WaitGroup
 
 	// Setup WebSocket connection
 	wsconn := url.URL{Scheme: "ws", Host: *addr, Path: "/data"}
 	log.Printf("connecting to %s", wsconn.String())
 
-	c, _, err := websocket.DefaultDialer.Dial(wsconn.String(), nil)
+	ws, _, err := websocket.DefaultDialer.Dial(wsconn.String(), nil)
 	if err != nil {
 		log.Fatal().Err(err).Msg("dial")
 	}
-	defer c.Close()
+	defer ws.Close()
 
-	// immediately send a message containing the application context so as to cache it on the server / ai
-	go func() {
-		msg := ctxtypes.CtxRequest{Step: ctxtypes.CtxStepLoadContext, Context: appCtx}
+	{
+		// immediately send a message containing the application context so as to cache it on the server / ai
+		msg := ctxtypes.CtxRequest{
+			ClientID: macAddr,
+			Step:     ctxtypes.CtxStepLoadContext,
+			Context:  appCtx,
+		}
 
 		msgData, err := json.Marshal(msg)
 		if err != nil {
 			log.Fatal().Err(err).Msg("Error marshalling JSON")
 		}
 
-		if err := c.WriteMessage(websocket.TextMessage, msgData); err != nil {
+		if err := ws.WriteMessage(websocket.TextMessage, msgData); err != nil {
 			log.Err(err).Msg("write")
-			close(done)
+		}
+	}
+
+	var readingPrompt atomic.Bool
+	readingPrompt.Store(true)
+
+	// Goroutine for reading input
+	reader := bufio.NewReader(os.Stdin)
+	for readingPrompt.Load() {
+		fmt.Printf("Instruction: ")
+		prompt, err := reader.ReadString('\n')
+		if err != nil {
+			log.Error().Err(err).Msg("Error reading input")
 			return
 		}
-	}()
 
-	// Message handler goroutine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-done:
-				return
-			case p := <-prompt:
-
-				// send the app context with the user prompt
-				msg := ctxtypes.CtxRequest{
-					Step:       ctxtypes.CtxStepFileSelection,
-					Context:    appCtx,
-					UserPrompt: p,
-				}
-
-				msgData, err := json.Marshal(msg)
-				if err != nil {
-					log.Fatal().Err(err).Msg("Error marshalling JSON")
-				}
-
-				// Send the payload to the server
-				if err := c.WriteMessage(websocket.TextMessage, msgData); err != nil {
-					log.Err(err).Msg("write")
-					close(done)
-					return
-				}
-			case sig := <-interrupt:
-				log.Info().Msgf("Received signal: %v", sig)
-
-				// Send close frame to server
-				closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-
-				// Write the close frame to the server
-				if err := c.WriteMessage(websocket.CloseMessage, closeMsg); err != nil {
-					log.Err(err).Msg("write close")
-					close(done)
-					return
-				}
-
-				// Wait for server to close the connection or timeout
-				go func() {
-					// Read messages until we get an error (which should be a close frame)
-					for {
-						_, _, err := c.ReadMessage()
-						if err != nil {
-							if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-								log.Info().Msg("Received close frame from server")
-							} else {
-								log.Warn().Err(err).Msg("Unexpected error while waiting for close frame")
-							}
-							close(done)
-							return
-						}
-					}
-				}()
-
-				// Wait for either done signal or timeout
-				select {
-				case <-done:
-					return
-				case <-time.After(time.Second):
-					log.Warn().Msg("Timeout waiting for server to close connection")
-					close(done)
-					return
-				}
-			}
+		prompt = strings.TrimSpace(prompt)
+		if prompt == "" {
+			continue
 		}
-	}()
 
-	// Input handler goroutine with non-blocking read
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+		readingPrompt.Store(false)
+		log.Info().Str("value", prompt).Msg("input")
 
-		// Create a channel for input
-		inputCh := make(chan string)
-
-		// Goroutine for reading input
-		go func() {
-			reader := bufio.NewReader(os.Stdin)
-			for {
-				fmt.Printf("Enter text: ")
-				input, err := reader.ReadString('\n')
-				if err != nil {
-					log.Error().Err(err).Msg("Error reading input")
-					close(done)
-					return
-				}
-				input = strings.TrimSpace(input)
-				if input != "" {
-					inputCh <- input
-				}
-			}
-		}()
-
-		// Goroutine for processing input
-		for {
-			select {
-			case <-done:
-				// Send an interrupt to stdin to unblock ReadString
-				// This is platform specific and may not work on all systems
-				p, err := os.FindProcess(os.Getpid())
-				if err == nil {
-					p.Signal(os.Interrupt)
-				}
-				return
-			case input := <-inputCh:
-				select {
-				case <-done:
-					return
-				case prompt <- input:
-					log.Info().Str("value", input).Msg("prompt")
-					spinnerDone := make(chan struct{})
-					// go func() {
-					// 	showSpinner(stop)
-					// 	close(spinnerDone)
-					// }()
-
-					_, message, err := c.ReadMessage()
-					if err != nil {
-						if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-							log.Info().Msg("Connection closed by server")
-						} else {
-							log.Err(err).Msg("Error reading message")
-						}
-						close(done)
-						return
-					}
-
-					stop <- true
-					<-spinnerDone
-
-					fmt.Print(string(message))
-					time.Sleep(100 * time.Millisecond)
-				}
-			}
+		// send the app context with the user prompt
+		msg := ctxtypes.CtxRequest{
+			ClientID:   macAddr,
+			Step:       ctxtypes.CtxStepFileSelection,
+			Context:    appCtx,
+			UserPrompt: prompt,
 		}
-	}()
 
-	// Wait for done signal
-	<-done
+		msgData, err := json.Marshal(msg)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Error marshalling JSON")
+		}
+
+		// Send the payload to the server
+		if err := ws.WriteMessage(websocket.TextMessage, msgData); err != nil {
+			log.Err(err).Msg("write")
+			return
+		}
+	}
+
+	// // Goroutine for processing input
+	// for {
+	// 	select {
+	// 	case input := <-inputCh:
+	// 		log.Info().Str("value", input).Msg("prompt")
+
+	// 		_, message, err := ws.ReadMessage()
+	// 		if err != nil {
+	// 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+	// 				log.Info().Msg("Connection closed by server")
+	// 			} else {
+	// 				log.Err(err).Msg("Error reading message")
+	// 			}
+	// 			return
+	// 		}
+
+	// 		fmt.Print(string(message))
+
+	// 	}
+	// }
+
+	// // WS receive message handler
+	// go func() {
+	// 	for {
+	// 		select {
+	// 		case p := <-prompt:
+
+	// 			// send the app context with the user prompt
+	// 			msg := ctxtypes.CtxRequest{
+	// 				ClientID:   macAddr,
+	// 				Step:       ctxtypes.CtxStepFileSelection,
+	// 				Context:    appCtx,
+	// 				UserPrompt: p,
+	// 			}
+
+	// 			msgData, err := json.Marshal(msg)
+	// 			if err != nil {
+	// 				log.Fatal().Err(err).Msg("Error marshalling JSON")
+	// 			}
+
+	// 			// Send the payload to the server
+	// 			if err := ws.WriteMessage(websocket.TextMessage, msgData); err != nil {
+	// 				log.Err(err).Msg("write")
+	// 				return
+	// 			}
+
+	// 		case sig := <-interrupt:
+	// 			log.Info().Msgf("Received signal: %v", sig)
+
+	// 			// Send close frame to server
+	// 			closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
+
+	// 			// Write the close frame to the server
+	// 			if err := ws.WriteMessage(websocket.CloseMessage, closeMsg); err != nil {
+	// 				log.Err(err).Msg("write close")
+	// 				return
+	// 			}
+
+	// 			// Wait for server to close the connection or timeout
+	// 			go func() {
+	// 				// Read messages until we get an error (which should be a close frame)
+	// 				for {
+	// 					_, _, err := ws.ReadMessage()
+	// 					if err != nil {
+	// 						if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+	// 							log.Info().Msg("Received close frame from server")
+	// 						} else {
+	// 							log.Warn().Err(err).Msg("Unexpected error while waiting for close frame")
+	// 						}
+	// 						return
+	// 					}
+	// 				}
+	// 			}()
+
+	// 			// Wait for either done signal or timeout
+	// 			select {
+	// 			case <-time.After(time.Second):
+	// 				log.Warn().Msg("Timeout waiting for server to close connection")
+	// 				return
+	// 			}
+	// 		}
+	// 	}
+	// }()
 
 	// Wait for goroutines to finish
-	wg.Wait()
+	// wg.Wait()
 
 	// Close channels
-	close(stop)
-	close(prompt)
+	close(interrupt)
 
 	log.Info().Msg("Graceful termination")
 }
@@ -325,6 +330,7 @@ func getContextFileTree(dirPath string, ignoreList []string) (map[string]ctxtype
 		// Split the relative path into parts to navigate the tree
 		parts := strings.Split(relPath, string(os.PathSeparator))
 		node := root
+
 		for _, part := range parts[:len(parts)-1] {
 			if child, exists := node.Children[part]; exists {
 				node = child // Navigate to the existing child node
@@ -341,7 +347,7 @@ func getContextFileTree(dirPath string, ignoreList []string) (map[string]ctxtype
 
 		// Check if the path matches the ignore list
 		if matchesIgnoreList(path, ignoreList) {
-			n := ctxtypes.FileSystemNode{Ignore: true}
+			n := ctxtypes.FileSystemNode{Skip: true}
 			if info.IsDir() {
 				n.Directory = true
 			}
@@ -362,15 +368,11 @@ func getContextFileTree(dirPath string, ignoreList []string) (map[string]ctxtype
 			}
 		} else {
 			// Parse the file for keywords
-			keywords, err := parseFile(relPath)
-			if err != nil {
-				log.Trace().Err(err).Msgf("Failed to parse file: %s", relPath)
-				return nil
-			}
-
-			// If the current item is a file, create a node without children
-			node.Children[name] = &ctxtypes.FileSystemNode{
-				Keywords: keywords,
+			if keywords, err := parseFile(relPath); err != nil {
+				node.Children[name] = &ctxtypes.FileSystemNode{}
+			} else {
+				// If the current item is a file, create a node without children
+				node.Children[name] = &ctxtypes.FileSystemNode{Keywords: keywords}
 			}
 		}
 

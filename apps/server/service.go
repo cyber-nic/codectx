@@ -1,0 +1,300 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	ctxtypes "github.com/cyber-nic/ctx/libs/types"
+	"github.com/gorilla/websocket"
+	"github.com/invopop/jsonschema"
+	"github.com/rs/zerolog/log"
+	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/googleai"
+)
+
+type CodeContextService interface {
+	Handler(ctx context.Context) func(w http.ResponseWriter, r *http.Request)
+}
+
+type codeContextService struct {
+	model llms.CallOption
+	llm   *googleai.GoogleAI
+}
+
+func NewCodeContextService(llm *googleai.GoogleAI, model string) CodeContextService {
+	return &codeContextService{
+		llm:   llm,
+		model: llms.WithModel(modelName),
+	}
+}
+
+func (wss *codeContextService) Handler(ctx context.Context) func(w http.ResponseWriter, r *http.Request) {
+	var upgrader = websocket.Upgrader{} // use default options
+
+	// model.ResponseMIMEType = "application/json"
+
+	type StepPreloadResponseSchema struct {
+		Step   string `json:"step"`
+		Status string `json:"status"`
+	}
+
+	type StepFileSelectItem struct {
+		Create bool
+		Path   string
+		Reason string
+	}
+
+	type StepFileSelectFiles struct {
+		Files []StepFileSelectItem `json:"files"`
+	}
+
+	type StepFileSelectResponseSchema struct {
+		Step   string              `json:"step"`
+		Status string              `json:"status"`
+		Data   StepFileSelectFiles `json:"data"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Err(err).Msg("ws upgrade")
+			return
+		}
+		defer c.Close()
+
+		// Set up a close handler
+		c.SetCloseHandler(func(code int, text string) error {
+			log.Info().Int("code", code).Str("text", text).Msg("received close frame")
+			message := websocket.FormatCloseMessage(code, "")
+			return c.WriteControl(websocket.CloseMessage, message, time.Now().Add(time.Second))
+		})
+
+		l := log.With().Str("client_ip", r.RemoteAddr).Logger()
+
+		for {
+			// block until a message is received
+			mt, message, err := c.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err,
+					websocket.CloseNormalClosure,
+					websocket.CloseGoingAway,
+					websocket.CloseAbnormalClosure) {
+					l.Err(err).Msg("unexpected close error")
+				} else {
+					l.Info().Msg("websocket closed normally")
+				}
+				break
+			}
+
+			log.Info().Int("type", mt).Msg("received message")
+
+			// Handle close messages
+			if mt == websocket.CloseMessage {
+				l.Info().Msg("received close message")
+				continue
+			}
+
+			// Only process text messages
+			if mt != websocket.TextMessage {
+				continue
+			}
+
+			// Unmarshal the message into CtxRequest
+			var req ctxtypes.CtxRequest
+			if err := json.Unmarshal(message, &req); err != nil {
+				l.Err(err).Msg("Error marshalling JSON")
+			}
+
+			// add client id to log
+			l = l.With().Str("client_id", req.ClientID).Str("step", string(req.Step)).Logger()
+
+			// Marshall the application context
+			jsonCtx, err := json.Marshal(req.Context)
+			// jsonData, err := json.MarshalIndent(req.Context, "", "")
+			if err != nil {
+				l.Err(err).Msg("Failed to marshal JSON")
+				continue
+			}
+
+			// Add the length of the context to the log
+			l = l.With().Int("len", len(jsonCtx)).Logger()
+
+			// Instructions for the AI
+			instructions := []string{}
+
+			switch req.Step {
+			// PRELOAD CONTEXT
+			case ctxtypes.CtxStepLoadContext:
+				schema := GenerateSchema[StepPreloadResponseSchema]()
+				instructions = []string{
+					"Acknowledge application context and respond step=preload and status=ok",
+					fmt.Sprintf("Respond using this JSON schema: %v", schema),
+				}
+
+				// Write the code context to disk
+				go func() {
+					f, err := os.OpenFile(debugCodeContextFile, os.O_CREATE|os.O_WRONLY, 0644)
+					if err != nil {
+						l.Fatal().Err(err).Msgf("Failed to open '%s' file", debugCodeContextFile)
+					}
+					defer f.Close()
+
+					if _, err := f.WriteString(string(jsonCtx)); err != nil {
+						l.Err(err).Msg("Failed to write to file")
+					}
+				}()
+
+			// SELECT FILES
+			case ctxtypes.CtxStepFileSelection:
+				schema := GenerateSchema[StepFileSelectFiles]()
+
+				instructions = []string{
+					fmt.Sprintf("You are a senior software engineer and system architect. Consider the previously provided application context along with this user prompt describing changes needed to the codebase: ``%s``.", req.UserPrompt),
+					"Return the list of files that should be altered in order to implement the requirements or instructions articulated in the prompt.",
+					fmt.Sprintf("Respond using this JSON schema: %v", schema),
+				}
+
+			default:
+				l.Warn().Str("step", string(req.Step)).Msg("unexpected step")
+			}
+			l.Debug().Msg("request")
+
+			promptParts, err := formatGenaiParts(string(jsonCtx), instructions)
+			if err != nil {
+				l.Err(err).Msg("unexpected error")
+				continue
+			}
+
+			content := []llms.MessageContent{
+				{
+					Role:  llms.ChatMessageTypeHuman,
+					Parts: promptParts,
+				},
+			}
+
+			start := time.Now()
+			aiResp, err := wss.llm.GenerateContent(ctx, content, wss.model, llms.WithTemperature(0.8), llms.WithJSONMode())
+
+			if err != nil {
+				l.Error().Err(err).Msg("ai failed to generate content") // Changed from Fatal to Error
+				wsErr := websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "ai generation failed")
+				c.WriteMessage(websocket.CloseMessage, wsErr)
+				continue
+			}
+
+			// Log the elapsed time
+			elapsed := time.Since(start)
+			l = l.With().Int64("elapsed_ms", elapsed.Milliseconds()).Logger()
+
+			data, err := extractResponseContent(aiResp)
+			if err != nil {
+				l.Err(err).Msg("failed to extract ai response content")
+
+				// preload doesn't expect a response
+				if req.Step != ctxtypes.CtxStepLoadContext {
+					wsErr := websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "failed to extract response")
+					c.WriteMessage(websocket.CloseMessage, wsErr)
+				}
+				continue
+			}
+
+			// debug
+			fmt.Println(data)
+
+			// ndelorme - unmarshal into step corresponding response model
+			switch req.Step {
+			case ctxtypes.CtxStepLoadContext:
+				// unmarshal data into StepPreloadResponseSchema
+				respData := StepPreloadResponseSchema{}
+
+				if err := json.Unmarshal([]byte(data), &respData); err != nil {
+					l.Err(err).Msg("failed to unmarshal preload ack response")
+					continue
+				}
+				l.Debug().Str("status", respData.Status).Msg("response")
+
+				// log preload ack to stdout
+				continue
+			case ctxtypes.CtxStepFileSelection:
+				// unmarshal data into StepPreloadResponseSchema
+				fileData := StepFileSelectFiles{}
+
+				if err := json.Unmarshal([]byte(data), &fileData); err != nil {
+					l.Err(err).Msg("failed to unmarshal preload ack response")
+					continue
+				}
+				l.Info().Str("status", "ok").Msg("response")
+
+				respData := StepFileSelectResponseSchema{
+					Step:   string(req.Step),
+					Status: "ok",
+					Data:   fileData,
+				}
+
+				// marshal response
+				d, err := json.Marshal(respData)
+				if err != nil {
+					l.Err(err).Msg("failed to marshal response")
+					continue
+				}
+
+				// preload doesn't expect a response
+				if err = c.WriteMessage(mt, []byte(d)); err != nil {
+					l.Err(err).Msg("failed to write message to ws")
+					continue
+				}
+
+			}
+
+		}
+	}
+}
+
+func extractResponseContent(resp *llms.ContentResponse) (string, error) {
+	builder := strings.Builder{}
+
+	for _, choice := range resp.Choices {
+		builder.Write([]byte(fmt.Sprintf("%s\n", choice.Content)))
+	}
+	return builder.String(), nil
+}
+
+func formatGenaiParts(codeCtx string, instructions []string) ([]llms.ContentPart, error) {
+
+	if len(instructions) == 0 {
+		return nil, errors.New("no instructions provided")
+	}
+
+	// Create llms.ContentPart to hold context and instructions
+	parts := make([]llms.ContentPart, 0, len(instructions)+1)
+
+	// Add code context
+	parts = append(parts, llms.TextPart(codeCtx))
+
+	// Add instructions
+	for _, instr := range instructions {
+		parts = append(parts, llms.TextPart(instr))
+	}
+
+	return parts, nil
+}
+
+func GenerateSchema[T any]() interface{} {
+	// Structured Outputs uses a subset of JSON schema
+	// These flags are necessary to comply with the subset
+	reflector := jsonschema.Reflector{
+		AllowAdditionalProperties: false,
+		DoNotReference:            true,
+	}
+	var v T
+	schema := reflector.Reflect(v)
+
+	j, _ := json.MarshalIndent(schema, "", "  ")
+	return string(j)
+}

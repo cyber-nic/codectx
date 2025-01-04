@@ -8,8 +8,9 @@ client:
 	# cd apps/client && air
 
 server:
-	#apps/server/bin/server
-	cd apps/server && air
+	$(MAKE) build-server
+	apps/server/bin/server
+	# cd apps/server && air
 
 build-client:
 	mkdir -p apps/client/bin
