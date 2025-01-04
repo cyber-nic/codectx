@@ -14,6 +14,7 @@ import (
 )
 
 const (
+	// this is the model name that we are using and should NEVER be changed
 	modelName            = "gemini-2.0-flash-exp"
 	debugCodeContextFile = "code.ctx"
 )

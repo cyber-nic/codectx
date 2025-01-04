@@ -290,7 +290,6 @@ func main() {
 		// Unmarshal to StepFileSelectResponseSchema
 		var workResp ctxtypes.StepFileWorkResponseSchema
 
-		var waitForIt atomic.Bool
 		waitForIt.Store(true)
 
 		// fetch files to update
@@ -313,7 +312,6 @@ func main() {
 			}
 
 			fmt.Printf("# %s\n", file.Path)
-			fmt.Println(workResp.Data.Explanation)
 			fmt.Println(workResp.Data.Patch)
 
 			// get folder from file path
