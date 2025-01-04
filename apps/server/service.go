@@ -146,8 +146,9 @@ func (wss *codeContextService) Handler(ctx context.Context) func(w http.Response
 
 				instructions = []string{
 					fmt.Sprintf("You are a senior software engineer and system architect. Consider the previously provided application context along with this user prompt describing changes needed to the codebase: ``%s``.", req.UserPrompt),
+					"You always follow best practices and ensure that your code is clean, maintainable, and well-documented. Your code should be production-ready and ready to be reviewed by your peers. Changes are razor-focused and should not include any unrelated changes.",
 					fmt.Sprintf("Respond using a properly formatted git patch, honoring the following schema: %v", schema),
-					fmt.Sprintf("Given the application context and the user prompt, generate the code changes needed to implement the requirements or instructions articulated in the prompt for the file: \n\n%s", req.WorkPrompt),
+					fmt.Sprintf("Given the application context and the user prompt, return the changes needed to implement the requirements or instructions articulated in the prompt for the file: \n\n%s", req.WorkPrompt),
 				}
 
 			// UNEXPECTED

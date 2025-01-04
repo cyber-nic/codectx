@@ -17,6 +17,7 @@ import (
 
 	ctxtypes "github.com/cyber-nic/ctx/libs/types"
 	ctxutils "github.com/cyber-nic/ctx/libs/utils"
+	"github.com/sergi/go-diff/diffmatchpatch"
 
 	"github.com/cyber-nic/ctx/apps/client/mapper"
 	"github.com/gorilla/websocket"
@@ -192,13 +193,28 @@ func main() {
 			return
 		}
 
-		ctxutils.PrintStructOut(selectResp)
+		// ctxutils.PrintStructOut(selectResp)
+
+		for _, file := range selectResp.Data.Files {
+			op := "update"
+			if file.Operation == ctxtypes.FileOperationCreate {
+				op = "create"
+			} else if file.Operation == ctxtypes.FileOperationRemove {
+				op = "remove"
+			}
+
+			fmt.Printf("%s | %s: %s\n", op, file.Path, file.Reason)
+		}
+
+		for _, file := range selectResp.Data.Additional {
+			fmt.Printf("+ %s: %s\n", file.Path, file.Reason)
+		}
 	}
 
 	// STEP 4: WORK
 
 	// create list of file contents requested by the server
-	filesContents := map[string]string{}
+	appCtx.FileContents = map[string]string{}
 
 	{
 		// include create and update files
@@ -213,7 +229,7 @@ func main() {
 				log.Err(err).Msg("Error reading file")
 				continue
 			}
-			filesContents[file.Path] = string(content)
+			appCtx.FileContents[file.Path] = string(content)
 
 		}
 		// include additional context files
@@ -224,12 +240,9 @@ func main() {
 				log.Err(err).Msg("Error reading file")
 				continue
 			}
-			filesContents[file.Path] = string(content)
+			appCtx.FileContents[file.Path] = string(content)
 		}
 	}
-
-	// append the file contents
-	appCtx.FileContents = filesContents
 
 	// request individual file changes
 	for _, file := range selectResp.Data.Files {
@@ -300,7 +313,43 @@ func main() {
 			}
 
 			fmt.Printf("# %s\n", file.Path)
-			ctxutils.PrintStructOut(workResp.Data)
+			fmt.Println(workResp.Data.Explanation)
+			fmt.Println(workResp.Data.Patch)
+
+			// get folder from file path
+			folder := filepath.Dir(file.Path)
+			// create folder if it doesn't exist
+			if _, err := os.Stat(folder); os.IsNotExist(err) {
+				if err := os.MkdirAll(folder, 0755); err != nil {
+					log.Err(err).Str("folder", folder).Msg("Error creating folder")
+				}
+			}
+
+			if err := os.WriteFile(fmt.Sprintf("%s.gitdiff", file.Path), []byte(workResp.Data.Patch), 0644); err != nil {
+				log.Err(err).Str("file", file.Path).Msg("Error writing diff file")
+			}
+
+			// Parse the patch
+			dmp := diffmatchpatch.New()
+			patches, err := dmp.PatchFromText(workResp.Data.Patch)
+			if err != nil {
+				log.Err(err).Str("file", file.Path).Msg("Error parsing patch")
+				continue
+			}
+
+			// Apply the patch
+			patchedStr, results := dmp.PatchApply(patches, appCtx.FileContents[file.Path])
+			for _, result := range results {
+				if !result {
+					log.Warn().Str("file", file.Path).Msg("Patch failed")
+				}
+			}
+
+			// Write the patched content back to the file
+			if err := os.WriteFile(file.Path, []byte(patchedStr), 0644); err != nil {
+				log.Err(err).Str("file", file.Path).Msg("Error writing file")
+			}
+
 		}
 
 	}
