@@ -14,6 +14,8 @@ CodeCTX is an AI-powered code context analysis tool that helps understand codeba
 
 ## Usage
 
+0. Set logging level. Both server and client support `-debug` flag and `CTX_LOG` env var. Details below.
+
 1. Start the server:
 
 ```bash
