@@ -104,6 +104,7 @@ func main() {
 	}
 	defer ws.Close()
 
+	// STEP 1: PRELOAD
 	{
 		// immediately send a message containing the application context so as to cache it on the server / ai
 		msg := ctxtypes.CtxRequest{
@@ -122,33 +123,37 @@ func main() {
 		}
 	}
 
-	var readingPrompt atomic.Bool
-	readingPrompt.Store(true)
+	// STEP 2: SELECT
+	var waitForIt atomic.Bool
+	waitForIt.Store(true)
+	userPrompt := ""
 
 	// Goroutine for reading input
 	reader := bufio.NewReader(os.Stdin)
-	for readingPrompt.Load() {
+	for waitForIt.Load() {
 		fmt.Printf("Instruction: ")
-		prompt, err := reader.ReadString('\n')
+		userPrompt, err := reader.ReadString('\n')
+
 		if err != nil {
+			waitForIt.Store(false)
 			log.Error().Err(err).Msg("Error reading input")
 			return
 		}
 
-		prompt = strings.TrimSpace(prompt)
-		if prompt == "" {
+		userPrompt = strings.TrimSpace(userPrompt)
+		if userPrompt == "" {
 			continue
 		}
 
-		readingPrompt.Store(false)
-		log.Info().Str("value", prompt).Msg("input")
+		waitForIt.Store(false)
+		log.Info().Str("value", userPrompt).Msg("input")
 
 		// send the app context with the user prompt
 		msg := ctxtypes.CtxRequest{
 			ClientID:   macAddr,
 			Step:       ctxtypes.CtxStepFileSelection,
 			Context:    appCtx,
-			UserPrompt: prompt,
+			UserPrompt: userPrompt,
 		}
 
 		msgData, err := json.Marshal(msg)
@@ -163,12 +168,16 @@ func main() {
 		}
 	}
 
-	var waitFileSelect atomic.Bool
-	waitFileSelect.Store(true)
+	// Unmarshal to StepFileSelectResponseSchema
+	var selectResp ctxtypes.StepFileSelectResponseSchema
+
+	waitForIt.Store(true)
 
 	// fetch files to update
-	for waitFileSelect.Load() {
+	for waitForIt.Load() {
 		_, message, err := ws.ReadMessage()
+		waitForIt.Store(false)
+
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				log.Info().Msg("Connection closed by server")
@@ -178,15 +187,122 @@ func main() {
 			return
 		}
 
-		// Unmarshal to StepFileSelectResponseSchema
-		var resp ctxtypes.StepFileSelectResponseSchema
-		if err := json.Unmarshal(message, &resp); err != nil {
+		if err := json.Unmarshal(message, &selectResp); err != nil {
 			log.Err(err).Msg("Error unmarshalling JSON")
 			return
 		}
 
-		ctxutils.PrintStructOut(resp)
-		waitFileSelect.Store(true)
+		ctxutils.PrintStructOut(selectResp)
+	}
+
+	// STEP 4: WORK
+
+	// create list of file contents requested by the server
+	filesContents := map[string]string{}
+
+	{
+		// include create and update files
+		for _, file := range selectResp.Data.Files {
+			if file.Operation != ctxtypes.FileOperationUpdate {
+				continue
+			}
+
+			// read the file contents
+			content, err := os.ReadFile(file.Path)
+			if err != nil {
+				log.Err(err).Msg("Error reading file")
+				continue
+			}
+			filesContents[file.Path] = string(content)
+
+		}
+		// include additional context files
+		for _, file := range selectResp.Data.Additional {
+			// read the file contents
+			content, err := os.ReadFile(file.Path)
+			if err != nil {
+				log.Err(err).Msg("Error reading file")
+				continue
+			}
+			filesContents[file.Path] = string(content)
+		}
+	}
+
+	// append the file contents
+	appCtx.FileContents = filesContents
+
+	// request individual file changes
+	for _, file := range selectResp.Data.Files {
+
+		// create a new version of the file
+		fileContentWithLineNumbers := fmt.Sprintf("# %s\n\n", file.Path)
+
+		// add line numbers to the file content
+		if file.Operation == ctxtypes.FileOperationUpdate {
+			// read the file line by line and create a new version where each line is prefixed with the line number
+			fileContents, err := os.ReadFile(file.Path)
+			if err != nil {
+				log.Err(err).Msg("Error reading file")
+				continue
+			}
+
+			scanner := bufio.NewScanner(strings.NewReader(string(fileContents)))
+			lineNumber := 1
+			for scanner.Scan() {
+				fileContentWithLineNumbers += fmt.Sprintf("%d | %s\n", lineNumber, scanner.Text())
+				lineNumber++
+			}
+		}
+
+		// fmt.Println(fileContentWithLineNumbers)
+
+		// request, wait and print changes
+		msg := ctxtypes.CtxRequest{
+			ClientID:   macAddr,
+			Step:       ctxtypes.CtxStepCodeWork,
+			Context:    appCtx,
+			UserPrompt: userPrompt,
+			WorkPrompt: fileContentWithLineNumbers,
+		}
+
+		msgData, err := json.Marshal(msg)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Error marshalling JSON")
+		}
+
+		if err := ws.WriteMessage(websocket.TextMessage, msgData); err != nil {
+			log.Err(err).Msg("write")
+		}
+
+		// Unmarshal to StepFileSelectResponseSchema
+		var workResp ctxtypes.StepFileWorkResponseSchema
+
+		var waitForIt atomic.Bool
+		waitForIt.Store(true)
+
+		// fetch files to update
+		for waitForIt.Load() {
+			_, message, err := ws.ReadMessage()
+			waitForIt.Store(false)
+
+			if err != nil {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					log.Info().Msg("Connection closed by server")
+				} else {
+					log.Err(err).Msg("Error reading message")
+				}
+				return
+			}
+
+			if err := json.Unmarshal(message, &workResp); err != nil {
+				log.Err(err).Msg("Error unmarshalling JSON")
+				return
+			}
+
+			fmt.Printf("# %s\n", file.Path)
+			ctxutils.PrintStructOut(workResp.Data)
+		}
+
 	}
 
 	// Close channels
@@ -282,7 +398,7 @@ func getContextFileTree(dirPath string, ignoreList []string) (map[string]ctxtype
 		}
 
 		// Extract the name of the current file or directory
-		name := parts[len(parts)-1]
+		// name := parts[len(parts)-1]
 
 		// Check if the path matches the ignore list
 		if matchesIgnoreList(path, ignoreList) {
@@ -291,7 +407,7 @@ func getContextFileTree(dirPath string, ignoreList []string) (map[string]ctxtype
 				n.Directory = true
 			}
 			// Mark the node as ignored
-			node.Children[name] = &n
+			node.Children[relPath] = &n
 			if info.IsDir() {
 				return filepath.SkipDir // Skip ignored directories
 			}
@@ -301,17 +417,17 @@ func getContextFileTree(dirPath string, ignoreList []string) (map[string]ctxtype
 		// Add the node to the tree
 		if info.IsDir() {
 			// If the current item is a directory, create a node with an empty children map
-			node.Children[name] = &ctxtypes.FileSystemNode{
+			node.Children[relPath] = &ctxtypes.FileSystemNode{
 				Directory: true,
 				Children:  make(map[string]*ctxtypes.FileSystemNode),
 			}
 		} else {
 			// Parse the file for keywords
 			if keywords, err := parseFile(relPath); err != nil {
-				node.Children[name] = &ctxtypes.FileSystemNode{}
+				node.Children[relPath] = &ctxtypes.FileSystemNode{}
 			} else {
 				// If the current item is a file, create a node without children
-				node.Children[name] = &ctxtypes.FileSystemNode{Keywords: keywords}
+				node.Children[relPath] = &ctxtypes.FileSystemNode{Keywords: keywords}
 			}
 		}
 

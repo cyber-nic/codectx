@@ -11,6 +11,7 @@ type FileSystemNode struct {
 type ApplicationContext struct {
 	FileSystem        map[string]FileSystemNode `json:"fs,omitempty"`
 	FileSystemDetails []string                  `json:"fs_details,omitempty"`
+	FileContents      map[string]string         `json:"file_contents,omitempty"`
 }
 
 type CtxStep string
@@ -27,6 +28,7 @@ type CtxRequest struct {
 	Context    ApplicationContext `json:"context,omitempty"`
 	Step       CtxStep            `json:"step"`
 	UserPrompt string             `json:"userPrompt,omitempty"`
+	WorkPrompt string             `json:"workPrompt,omitempty"`
 }
 
 // CtxResponse represents a message sent from server to client
@@ -40,19 +42,39 @@ type StepPreloadResponseSchema struct {
 	Status string `json:"status"`
 }
 
+type FileOperation int
+
+const (
+	FileOperationRemove FileOperation = -1
+	FileOperationUpdate FileOperation = 0
+	FileOperationCreate FileOperation = 1
+)
+
 type StepFileSelectItem struct {
-	Operation int
+	Operation FileOperation
 	Path      string
 	Reason    string
 }
 
 type StepFileSelectFiles struct {
-	Files   []StepFileSelectItem `json:"files"`
-	Context []StepFileSelectItem `json:"additional_context_files"`
+	Files      []StepFileSelectItem `json:"files"`
+	Additional []StepFileSelectItem `json:"additional_context_files"`
 }
 
 type StepFileSelectResponseSchema struct {
-	Step   string              `json:"step"`
-	Status string              `json:"status"`
-	Data   StepFileSelectFiles `json:"data"`
+	Timestamp string              `json:"timestamp"`
+	Step      string              `json:"step"`
+	Status    string              `json:"status"`
+	Data      StepFileSelectFiles `json:"data"`
+}
+
+type PatchData struct {
+	Patch string `json:"patch"`
+}
+
+type StepFileWorkResponseSchema struct {
+	Timestamp string    `json:"timestamp"`
+	Step      string    `json:"step"`
+	Status    string    `json:"status"`
+	Data      PatchData `json:"data"`
 }

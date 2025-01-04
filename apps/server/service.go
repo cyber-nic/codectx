@@ -136,10 +136,21 @@ func (wss *codeContextService) Handler(ctx context.Context) func(w http.Response
 				instructions = []string{
 					fmt.Sprintf("You are a senior software engineer and system architect. Consider the previously provided application context along with this user prompt describing changes needed to the codebase: ``%s``.", req.UserPrompt),
 					"First identity the list of files that will need to be altered, created or removed in order to implement the requirements or instructions articulated in the prompt. Return these in the `files` array. The `operation` field must be set to 0 for updates, 1 for create, and -1 for remove.",
-					"Next identity additional files for which the content would be useful to know in order to perform the requested changes. Return this list of files in the `context` array.",
+					"Next identity additional files for which the content would be useful to have in order to perform the requested changes. Return this list of files in the `additional_context_files` array.",
 					fmt.Sprintf("Respond using this JSON schema: %v", schema),
 				}
 
+			// WORK
+			case ctxtypes.CtxStepCodeWork:
+				schema := GenerateSchema[ctxtypes.PatchData]()
+
+				instructions = []string{
+					fmt.Sprintf("You are a senior software engineer and system architect. Consider the previously provided application context along with this user prompt describing changes needed to the codebase: ``%s``.", req.UserPrompt),
+					fmt.Sprintf("Respond using a properly formatted git patch, honoring the following schema: %v", schema),
+					fmt.Sprintf("Given the application context and the user prompt, generate the code changes needed to implement the requirements or instructions articulated in the prompt for the file: \n\n%s", req.WorkPrompt),
+				}
+
+			// UNEXPECTED
 			default:
 				l.Warn().Str("step", string(req.Step)).Msg("unexpected step")
 			}
@@ -207,12 +218,44 @@ func (wss *codeContextService) Handler(ctx context.Context) func(w http.Response
 					continue
 				}
 				l.Debug().Str("status", "ok").Msg("response")
-				log.Trace().Str("status", "ok").Str("data", data).Msg("response")
 
 				respData := ctxtypes.StepFileSelectResponseSchema{
-					Step:   string(req.Step),
-					Status: "ok",
-					Data:   fileData,
+					Timestamp: time.Now().Format(time.RFC3339),
+					Step:      string(req.Step),
+					Status:    "ok",
+					Data:      fileData,
+				}
+
+				// marshal response
+				d, err := json.Marshal(respData)
+				if err != nil {
+					l.Err(err).Msg("failed to marshal response")
+					continue
+				}
+
+				// preload doesn't expect a response
+				if err = c.WriteMessage(mt, []byte(d)); err != nil {
+					l.Err(err).Msg("failed to write message to ws")
+					continue
+				}
+
+			case ctxtypes.CtxStepCodeWork:
+				// unmarshal data into PatchData
+				patchData := ctxtypes.PatchData{}
+
+				fmt.Println(data)
+
+				if err := json.Unmarshal([]byte(data), &patchData); err != nil {
+					l.Err(err).Msg("failed to unmarshal git patch response")
+					continue
+				}
+				l.Debug().Str("status", "ok").Msg("response")
+
+				respData := ctxtypes.StepFileWorkResponseSchema{
+					Timestamp: time.Now().Format(time.RFC3339),
+					Step:      string(req.Step),
+					Status:    "ok",
+					Data:      patchData,
 				}
 
 				// marshal response
