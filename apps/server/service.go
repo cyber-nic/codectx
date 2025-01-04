@@ -39,27 +39,6 @@ func (wss *codeContextService) Handler(ctx context.Context) func(w http.Response
 
 	// model.ResponseMIMEType = "application/json"
 
-	type StepPreloadResponseSchema struct {
-		Step   string `json:"step"`
-		Status string `json:"status"`
-	}
-
-	type StepFileSelectItem struct {
-		Create bool
-		Path   string
-		Reason string
-	}
-
-	type StepFileSelectFiles struct {
-		Files []StepFileSelectItem `json:"files"`
-	}
-
-	type StepFileSelectResponseSchema struct {
-		Step   string              `json:"step"`
-		Status string              `json:"status"`
-		Data   StepFileSelectFiles `json:"data"`
-	}
-
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -131,7 +110,7 @@ func (wss *codeContextService) Handler(ctx context.Context) func(w http.Response
 			switch req.Step {
 			// PRELOAD CONTEXT
 			case ctxtypes.CtxStepLoadContext:
-				schema := GenerateSchema[StepPreloadResponseSchema]()
+				schema := GenerateSchema[ctxtypes.StepPreloadResponseSchema]()
 				instructions = []string{
 					"Acknowledge application context and respond step=preload and status=ok",
 					fmt.Sprintf("Respond using this JSON schema: %v", schema),
@@ -152,11 +131,12 @@ func (wss *codeContextService) Handler(ctx context.Context) func(w http.Response
 
 			// SELECT FILES
 			case ctxtypes.CtxStepFileSelection:
-				schema := GenerateSchema[StepFileSelectFiles]()
+				schema := GenerateSchema[ctxtypes.StepFileSelectFiles]()
 
 				instructions = []string{
 					fmt.Sprintf("You are a senior software engineer and system architect. Consider the previously provided application context along with this user prompt describing changes needed to the codebase: ``%s``.", req.UserPrompt),
-					"Return the list of files that should be altered in order to implement the requirements or instructions articulated in the prompt.",
+					"First identity the list of files that will need to be altered, created or removed in order to implement the requirements or instructions articulated in the prompt. Return these in the `files` array. The `operation` field must be set to 0 for updates, 1 for create, and -1 for remove.",
+					"Next identity additional files for which the content would be useful to know in order to perform the requested changes. Return this list of files in the `context` array.",
 					fmt.Sprintf("Respond using this JSON schema: %v", schema),
 				}
 
@@ -204,14 +184,11 @@ func (wss *codeContextService) Handler(ctx context.Context) func(w http.Response
 				continue
 			}
 
-			// debug
-			fmt.Println(data)
-
 			// ndelorme - unmarshal into step corresponding response model
 			switch req.Step {
 			case ctxtypes.CtxStepLoadContext:
 				// unmarshal data into StepPreloadResponseSchema
-				respData := StepPreloadResponseSchema{}
+				respData := ctxtypes.StepPreloadResponseSchema{}
 
 				if err := json.Unmarshal([]byte(data), &respData); err != nil {
 					l.Err(err).Msg("failed to unmarshal preload ack response")
@@ -223,15 +200,16 @@ func (wss *codeContextService) Handler(ctx context.Context) func(w http.Response
 				continue
 			case ctxtypes.CtxStepFileSelection:
 				// unmarshal data into StepPreloadResponseSchema
-				fileData := StepFileSelectFiles{}
+				fileData := ctxtypes.StepFileSelectFiles{}
 
 				if err := json.Unmarshal([]byte(data), &fileData); err != nil {
 					l.Err(err).Msg("failed to unmarshal preload ack response")
 					continue
 				}
-				l.Info().Str("status", "ok").Msg("response")
+				l.Debug().Str("status", "ok").Msg("response")
+				log.Trace().Str("status", "ok").Str("data", data).Msg("response")
 
-				respData := StepFileSelectResponseSchema{
+				respData := ctxtypes.StepFileSelectResponseSchema{
 					Step:   string(req.Step),
 					Status: "ok",
 					Data:   fileData,

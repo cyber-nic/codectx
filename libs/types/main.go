@@ -34,3 +34,25 @@ type CtxResponse struct {
 	DisplayMessage string   `json:"display_message,omitempty"`
 	Instructions   []string `json:"instructions,omitempty"`
 }
+
+type StepPreloadResponseSchema struct {
+	Step   string `json:"step"`
+	Status string `json:"status"`
+}
+
+type StepFileSelectItem struct {
+	Operation int
+	Path      string
+	Reason    string
+}
+
+type StepFileSelectFiles struct {
+	Files   []StepFileSelectItem `json:"files"`
+	Context []StepFileSelectItem `json:"additional_context_files"`
+}
+
+type StepFileSelectResponseSchema struct {
+	Step   string              `json:"step"`
+	Status string              `json:"status"`
+	Data   StepFileSelectFiles `json:"data"`
+}

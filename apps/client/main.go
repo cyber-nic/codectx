@@ -163,92 +163,31 @@ func main() {
 		}
 	}
 
-	// // Goroutine for processing input
-	// for {
-	// 	select {
-	// 	case input := <-inputCh:
-	// 		log.Info().Str("value", input).Msg("prompt")
+	var waitFileSelect atomic.Bool
+	waitFileSelect.Store(true)
 
-	// 		_, message, err := ws.ReadMessage()
-	// 		if err != nil {
-	// 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-	// 				log.Info().Msg("Connection closed by server")
-	// 			} else {
-	// 				log.Err(err).Msg("Error reading message")
-	// 			}
-	// 			return
-	// 		}
+	// fetch files to update
+	for waitFileSelect.Load() {
+		_, message, err := ws.ReadMessage()
+		if err != nil {
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				log.Info().Msg("Connection closed by server")
+			} else {
+				log.Err(err).Msg("Error reading message")
+			}
+			return
+		}
 
-	// 		fmt.Print(string(message))
+		// Unmarshal to StepFileSelectResponseSchema
+		var resp ctxtypes.StepFileSelectResponseSchema
+		if err := json.Unmarshal(message, &resp); err != nil {
+			log.Err(err).Msg("Error unmarshalling JSON")
+			return
+		}
 
-	// 	}
-	// }
-
-	// // WS receive message handler
-	// go func() {
-	// 	for {
-	// 		select {
-	// 		case p := <-prompt:
-
-	// 			// send the app context with the user prompt
-	// 			msg := ctxtypes.CtxRequest{
-	// 				ClientID:   macAddr,
-	// 				Step:       ctxtypes.CtxStepFileSelection,
-	// 				Context:    appCtx,
-	// 				UserPrompt: p,
-	// 			}
-
-	// 			msgData, err := json.Marshal(msg)
-	// 			if err != nil {
-	// 				log.Fatal().Err(err).Msg("Error marshalling JSON")
-	// 			}
-
-	// 			// Send the payload to the server
-	// 			if err := ws.WriteMessage(websocket.TextMessage, msgData); err != nil {
-	// 				log.Err(err).Msg("write")
-	// 				return
-	// 			}
-
-	// 		case sig := <-interrupt:
-	// 			log.Info().Msgf("Received signal: %v", sig)
-
-	// 			// Send close frame to server
-	// 			closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-
-	// 			// Write the close frame to the server
-	// 			if err := ws.WriteMessage(websocket.CloseMessage, closeMsg); err != nil {
-	// 				log.Err(err).Msg("write close")
-	// 				return
-	// 			}
-
-	// 			// Wait for server to close the connection or timeout
-	// 			go func() {
-	// 				// Read messages until we get an error (which should be a close frame)
-	// 				for {
-	// 					_, _, err := ws.ReadMessage()
-	// 					if err != nil {
-	// 						if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-	// 							log.Info().Msg("Received close frame from server")
-	// 						} else {
-	// 							log.Warn().Err(err).Msg("Unexpected error while waiting for close frame")
-	// 						}
-	// 						return
-	// 					}
-	// 				}
-	// 			}()
-
-	// 			// Wait for either done signal or timeout
-	// 			select {
-	// 			case <-time.After(time.Second):
-	// 				log.Warn().Msg("Timeout waiting for server to close connection")
-	// 				return
-	// 			}
-	// 		}
-	// 	}
-	// }()
-
-	// Wait for goroutines to finish
-	// wg.Wait()
+		ctxutils.PrintStructOut(resp)
+		waitFileSelect.Store(true)
+	}
 
 	// Close channels
 	close(interrupt)
