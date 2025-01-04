@@ -327,9 +327,14 @@ func main() {
 				log.Err(err).Str("file", file.Path).Msg("Error writing diff file")
 			}
 
+			// HACK
+			// remove first two lines from the workResp.Data.Patch
+			minusTwo := strings.Split(workResp.Data.Patch, "\n")[2:]
+			minusTwoStr := strings.Join(minusTwo, "\n")
+
 			// Parse the patch
 			dmp := diffmatchpatch.New()
-			patches, err := dmp.PatchFromText(workResp.Data.Patch)
+			patches, err := dmp.PatchFromText(minusTwoStr)
 			if err != nil {
 				log.Err(err).Str("file", file.Path).Msg("Error parsing patch")
 				continue
